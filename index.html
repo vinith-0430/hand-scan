@@ -1,0 +1,171 @@
+<!-- index.html -->
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Hand Scan (GitHub Pages)</title>
+  <style>
+    :root { --w: 960px; }
+    body { margin: 0; font-family: system-ui, Arial, sans-serif; background:#0b0c10; color:#eaf0f1; display:flex; flex-direction:column; align-items:center; gap:12px; }
+    header { padding:14px 16px; width:100%; max-width:var(--w); box-sizing:border-box; }
+    .stage {
+      position: relative; width: 100%; max-width: var(--w); aspect-ratio: 16/9;
+      background: #111; border-radius: 14px; overflow: hidden; box-shadow: 0 10px 30px rgba(0,0,0,.35);
+    }
+    #output { position: absolute; inset: 0; width:100%; height:100%; }
+    #videoInput { display:none; } /* camera stream element (hidden) */
+    #template {
+      position:absolute; left:50%; top:50%; transform:translate(-50%,-50%);
+      pointer-events:none; opacity:.9; user-select:none;
+    }
+    #clip {
+      position:absolute; left:50%; top:50%; transform:translate(-50%,-50%);
+      width:min(70%, 640px); display:none; border-radius: 12px; box-shadow: 0 10px 30px rgba(0,0,0,.6);
+    }
+    .controls { display:flex; gap:8px; padding:0 16px 16px; width:100%; max-width:var(--w); box-sizing:border-box; }
+    button {
+      background:#1f6feb; color:white; border:none; padding:10px 14px; border-radius:10px; font-weight:600; cursor:pointer;
+    }
+    button:disabled { opacity:.6; cursor:not-allowed; }
+    .note { opacity:.8; font-size:.92rem; }
+  </style>
+</head>
+<body>
+  <header>
+    <h2>Hand Scanner (Web)</h2>
+    <div class="note">Click “Start camera”, allow camera access, then align your hand inside the on-screen template. When your hand fits inside, the video will play.</div>
+  </header>
+
+  <div class="stage">
+    <canvas id="output"></canvas>
+    <img id="template" src="hand_template.png" alt="hand template" />
+    <video id="clip" src="vid.mp4" preload="auto" playsinline></video>
+    <video id="videoInput" playsinline></video>
+  </div>
+
+  <div class="controls">
+    <button id="startBtn">Start camera</button>
+    <span class="note">Tip: If you see nothing, your browser might have blocked the camera.</span>
+  </div>
+
+  <!-- MediaPipe (classic) JS CDN packages -->
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+
+  <script>
+    const videoEl   = document.getElementById('videoInput');
+    const canvasEl  = document.getElementById('output');
+    const ctx       = canvasEl.getContext('2d');
+    const template  = document.getElementById('template');
+    const clip      = document.getElementById('clip');
+    const startBtn  = document.getElementById('startBtn');
+
+    // Resize canvas to stage size
+    function fitCanvas() {
+      const rect = canvasEl.parentElement.getBoundingClientRect();
+      canvasEl.width = Math.floor(rect.width);
+      canvasEl.height = Math.floor(rect.height);
+    }
+    addEventListener('resize', fitCanvas);
+    fitCanvas();
+
+    // When template image loads, center it and keep its natural size (or scale down if too big)
+    function placeTemplate() {
+      const maxW = canvasEl.width * 0.45;
+      const maxH = canvasEl.height * 0.7;
+      const scale = Math.min(1, maxW / template.naturalWidth, maxH / template.naturalHeight);
+      template.style.width = Math.floor(template.naturalWidth * scale) + 'px';
+      template.style.height = 'auto';
+    }
+    template.onload = placeTemplate;
+
+    // Hand bounding-box within template check
+    function isHandInsideTemplate(landmarks, w, h) {
+      // Compute pixel-space bbox for hand
+      let xs = landmarks.map(p => p.x * w);
+      let ys = landmarks.map(p => p.y * h);
+      const xMin = Math.min(...xs), xMax = Math.max(...xs);
+      const yMin = Math.min(...ys), yMax = Math.max(...ys);
+
+      // Template rect (centered)
+      const tplRect = template.getBoundingClientRect();
+      const cvsRect = canvasEl.getBoundingClientRect();
+      const left = tplRect.left - cvsRect.left;
+      const top  = tplRect.top  - cvsRect.top;
+      const right = left + tplRect.width;
+      const bottom = top + tplRect.height;
+
+      const inside = (xMin >= left && xMax <= right && yMin >= top && yMax <= bottom);
+      return { inside, bbox: {xMin, yMin, xMax, yMax}, rect: {left, top, right, bottom} };
+    }
+
+    // Draw helper visuals
+    function drawScene(frame) {
+      ctx.save();
+      ctx.clearRect(0,0,canvasEl.width, canvasEl.height);
+      // draw current video frame
+      ctx.drawImage(frame, 0, 0, canvasEl.width, canvasEl.height);
+      ctx.restore();
+    }
+
+    // MediaPipe setup
+    const hands = new Hands({
+      locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
+    });
+    hands.setOptions({
+      maxNumHands: 1,
+      minDetectionConfidence: 0.7,
+      minTrackingConfidence: 0.6,
+      modelComplexity: 1
+    });
+
+    hands.onResults((results) => {
+      drawScene(results.image);
+
+      if (results.multiHandLandmarks && results.multiHandLandmarks.length) {
+        // Draw landmarks
+        for (const lm of results.multiHandLandmarks) {
+          drawingUtils.drawConnectors(ctx, lm, Hands.HAND_CONNECTIONS);
+          drawingUtils.drawLandmarks(ctx, lm, {radius: 2});
+        }
+        // Check if inside template
+        const { inside } = isHandInsideTemplate(
+          results.multiHandLandmarks[0],
+          canvasEl.width, canvasEl.height
+        );
+
+        if (inside) {
+          if (clip.paused) { clip.currentTime = 0; clip.play().catch(()=>{}); }
+          clip.style.display = 'block';
+        } else {
+          clip.pause();
+          clip.style.display = 'none';
+        }
+      } else {
+        clip.pause();
+        clip.style.display = 'none';
+      }
+    });
+
+    let camera;
+    startBtn.addEventListener('click', async () => {
+      startBtn.disabled = true;
+      placeTemplate();
+      // Camera helper streams frames into MediaPipe
+      camera = new Camera(videoEl, {
+        onFrame: async () => { await hands.send({image: videoEl}); },
+        width: 960,
+        height: Math.round(960 * 9/16)
+      });
+      try {
+        await camera.start();
+      } catch (e) {
+        alert('Camera start failed: ' + e.message);
+        startBtn.disabled = false;
+      }
+    });
+  </script>
+</body>
+</html>
